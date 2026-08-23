@@ -4099,7 +4099,11 @@ async function localLLMGenerateAchievements(posts, count) {
 // skipped automatically; the next route is tried.
 // ============================================================================
 
-const LIVE_SEARCH_TIMEOUT_MS = 12000;
+const LIVE_SEARCH_TIMEOUT_MS = 9000;
+const LIVE_SEARCH_MOBILE_TIMEOUT_MS = 7000;
+let liveSearchInFlight = null;
+const liveSearchCache = new Map();
+const LIVE_SEARCH_CACHE_TTL = 120000;
 
 function withTimeoutSignal(timeoutMs) {
   const controller = new AbortController();
@@ -4130,14 +4134,24 @@ async function fetchTextRoute(url, options) {
 }
 
 async function fetchSearchGateway(query) {
-  const q = encodeURIComponent(String(query || "").trim());
+  const cleanQuery = String(query || "").trim();
+  if (!cleanQuery) throw new Error("empty search query");
 
-  // Route 1: Jina Search — intended as a web-search endpoint and usable from
-  // static frontends. It returns search content in a Markdown/reader format.
-  const jinaSearchUrls = [
-    "https://s.jina.ai/" + q,
-    "https://s.jina.ai/?q=" + q
-  ];
+  const cacheKey = cleanQuery.toLowerCase();
+  const cached = liveSearchCache.get(cacheKey);
+  if (cached && (Date.now() - cached.time) < LIVE_SEARCH_CACHE_TTL) return cached.value;
+  if (liveSearchInFlight && liveSearchInFlight.has(cacheKey)) return liveSearchInFlight.get(cacheKey);
+
+  const promise = (async function() {
+    const q = encodeURIComponent(cleanQuery);
+    const mobile = window.innerWidth < 768 || window.matchMedia?.('(pointer: coarse)').matches;
+
+    // IMPORTANT: Jina Search's documented browser form is ?q=. The old
+    // /<query> form could waste the whole timeout on mobile before reaching
+    // the working endpoint. Keep the valid route first on every device.
+    const jinaSearchUrls = [
+      "https://s.jina.ai/?q=" + q
+    ];
 
   // Route 2: Jina Reader wrapping DuckDuckGo HTML search.
   const jinaReaderUrls = [
@@ -4177,7 +4191,9 @@ async function fetchSearchGateway(query) {
   for (const route of routes) {
     try {
       const body = await fetchTextRoute(route.url, {
-        timeout: route.kind === "jina-search" ? 15000 : LIVE_SEARCH_TIMEOUT_MS,
+        timeout: mobile
+          ? LIVE_SEARCH_MOBILE_TIMEOUT_MS
+          : (route.kind === "jina-search" ? 10000 : LIVE_SEARCH_TIMEOUT_MS),
         headers: route.kind === "jina-search"
           ? { "Accept": "text/plain, text/markdown;q=0.9, */*;q=0.8" }
           : undefined
@@ -4185,16 +4201,24 @@ async function fetchSearchGateway(query) {
 
       // Keep the response type so the parser can distinguish a search page
       // from a reader/markdown result payload.
-      return {
-        body: body,
-        kind: route.kind
-      };
+      const value = { body: body, kind: route.kind };
+      liveSearchCache.set(cacheKey, { time: Date.now(), value: value });
+      return value;
     } catch (e) {
       errors.push(route.kind + ":" + (e && e.name === "AbortError" ? "timeout" : (e && e.message ? e.message : "failed")));
     }
   }
 
-  throw new Error("Live search unavailable (" + errors.slice(0, 3).join(", ") + ")");
+    throw new Error("Live search unavailable (" + errors.slice(0, 3).join(", ") + ")");
+  })();
+
+  if (!liveSearchInFlight) liveSearchInFlight = new Map();
+  liveSearchInFlight.set(cacheKey, promise);
+  try {
+    return await promise;
+  } finally {
+    liveSearchInFlight.delete(cacheKey);
+  }
 }
 
 function cleanSearchText(value) {
@@ -4232,6 +4256,8 @@ function parseDuckDuckGoResults(response, sourceQuery) {
   const payload = response && typeof response === "object" && "body" in response
     ? response
     : { body: String(response || ""), kind: "unknown" };
+  // Jina search can return Markdown without DDG's .result classes. Do not
+  // reject those responses just because the native HTML selector is empty.
 
   const raw = String(payload.body || "");
   const results = [];
@@ -4393,24 +4419,27 @@ async function fetchStandaloneTrendingMemes(requestedCount) {
 
 window.testOnlineMemeSource = async function() {
   const status = document.getElementById("local-ai-status");
-  if (status) status.textContent = "Testing live meme search…";
+  if (status) status.textContent = "Testing live web search…";
   try {
+    if (navigator.onLine === false) throw new Error("device is offline");
     let liveItems = [];
+    let lastError = null;
     for (const query of ONLINE_MEME_QUERIES.slice(0, 3)) {
       try {
-        const html = await fetchSearchGateway(query);
-        liveItems.push.apply(liveItems, parseDuckDuckGoResults(html, query));
-      } catch (e) {}
+        const response = await fetchSearchGateway(query);
+        liveItems.push.apply(liveItems, parseDuckDuckGoResults(response, query));
+        if (liveItems.length >= 8) break;
+      } catch (e) { lastError = e; }
     }
-    if (!liveItems.length) throw new Error("No live DuckDuckGo results returned");
+    if (!liveItems.length) throw (lastError || new Error("Search returned no parseable results"));
     state.memeSource = "online";
     updateStatusUI();
-    if (status) status.textContent = "ONLINE WEB WORKING — " + liveItems.length + " meme/search results found. " + (localMemeAI.ready ? "Local AI can convert them into achievements." : "Enable Local AI to convert them into achievements standalone.");
+    if (status) status.textContent = "ONLINE WEB WORKING — " + liveItems.length + " live web results found. " + (localMemeAI.ready ? "Local AI can convert them into achievements." : "Enable Local AI to convert them into achievements standalone.");
     return liveItems.length;
   } catch (e) {
     state.memeSource = "offline";
     updateStatusUI();
-    if (status) status.textContent = "ONLINE WEB TEST FAILED — " + (e && e.message ? e.message : "network/CORS blocked");
+    if (status) status.textContent = "ONLINE WEB TEST FAILED — " + (e && e.message ? e.message : "network/CORS blocked") + ". Tap again to retry.";
     return 0;
   }
 };
