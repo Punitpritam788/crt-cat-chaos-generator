@@ -4031,10 +4031,8 @@ async function enableLocalTrendingAI() {
 
   setLocalAIAllowed(true);
   localMemeAI.loading = true;
-  const btn = document.getElementById("btn-enable-local-ai");
   const bar = document.getElementById("local-ai-progress");
   const fill = bar && bar.firstElementChild;
-  const status = document.getElementById("local-ai-status");
   if (btn) btn.disabled = true;
   if (bar) bar.style.display = "block";
   try {
