@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>CRT Cat — Chaos Achievement Generator (Standalone Intro)</title>
+<title>CRT Cat — Chaos Achievement Generator • GitHub Pages</title>
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
   html, body { width: 100%; height: 100%; overflow: hidden; background: #050308; font-family: 'Courier New', monospace; color: #e0e0e0; }
@@ -3741,13 +3741,14 @@ window.addEventListener("orientationchange", function() {
 //     canvas with 35 scene archetypes, cached per (scene, rarity, seed).
 
 const API_BASE = "http://localhost:3000";
+const IS_GITHUB_PAGES = /(^|\.)github\.io$/i.test(location.hostname || "");
 
 // ---- Standalone local meme AI ----
 const LOCAL_AI_STORAGE_KEY = "crt-cat-local-meme-ai-v1";
 const NATIVE_AI_DISABLED_STORAGE_KEY = "crt-cat-native-ai-disabled-v1";
 const LOCAL_AI_MODEL = "HuggingFaceTB/SmolLM2-135M-Instruct";
 const LOCAL_MEME_SUBREDDITS = ["memes", "dankmemes", "me_irl"];
-let localMemeAI = { enabled: false, ready: false, loading: false, generator: null, nativeSession: null, device: null, kind: null };
+let localMemeAI = { enabled: false, ready: false, loading: false, generating: false, generator: null, nativeSession: null, device: null, kind: null };
 const ONLINE_MEME_QUERIES = [
   "funny memes today", "viral memes today", "reddit memes today",
   "dank memes funny posts", "Know Your Meme trending memes",
@@ -3983,60 +3984,131 @@ window.uninstallLocalTrendingAI = uninstallLocalTrendingAI;
 
 async function enableLocalTrendingAI() {
   if (localMemeAI.loading || localMemeAI.ready) { closeLocalAISetup(); return; }
+
   setLocalAIAllowed(true);
   localMemeAI.loading = true;
   const btn = document.getElementById("btn-enable-local-ai");
   const bar = document.getElementById("local-ai-progress");
   const fill = bar && bar.firstElementChild;
   const status = document.getElementById("local-ai-status");
+
   if (btn) btn.disabled = true;
   if (bar) bar.style.display = "block";
+  if (fill) fill.style.width = "0%";
+
   try {
-    if (status) status.textContent = "Installing Hugging Face model…";
+    if (status) status.textContent = "Loading Transformers.js…";
     const mod = await import("https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.8.1/+esm");
     const pipeline = mod.pipeline;
-    const hasWebGPU = typeof navigator !== "undefined" && !!navigator.gpu;
-    const preferredDevice = hasWebGPU ? "webgpu" : "wasm";
-    const options = hasWebGPU ? { device: "webgpu", dtype: "q4" } : { device: "wasm", dtype: "q4" };
-    localMemeAI.device = preferredDevice;
-    localMemeAI.kind = "transformers";
-    localMemeAI.generator = await pipeline("text-generation", LOCAL_AI_MODEL, {
-      ...options,
-      progress_callback: function(info) {
-        if (!fill) return;
-        let pct = 0;
-        if (typeof info.progress === "number") pct = Math.max(0, Math.min(100, info.progress));
-        else if (info.status === "ready") pct = 100;
-        fill.style.width = pct + "%";
-        if (status && info.status) status.textContent = "Model: " + info.status + (info.file ? " · " + info.file : "");
+
+    const hasWebGPU =
+      typeof navigator !== "undefined" &&
+      !!navigator.gpu;
+
+    // SmolLM2-135M-Instruct has a known Transformers.js backend
+    // compatibility distinction: q4f16 is the safer WebGPU choice,
+    // while q4 avoids fp16 CPU/WASM issues.
+    const attempts = hasWebGPU
+      ? [
+          { device: "webgpu", dtype: "q4f16" },
+          { device: "webgpu", dtype: "q4" },
+          { device: "wasm", dtype: "q4" }
+        ]
+      : [
+          { device: "wasm", dtype: "q4" }
+        ];
+
+    let generator = null;
+    let used = null;
+    let lastError = null;
+
+    for (const options of attempts) {
+      try {
+        if (status) {
+          status.textContent =
+            "Installing Hugging Face model via " +
+            options.device.toUpperCase() + " / " + options.dtype + "…";
+        }
+
+        generator = await pipeline("text-generation", LOCAL_AI_MODEL, {
+          device: options.device,
+          dtype: options.dtype,
+          progress_callback: function(info) {
+            if (!fill) return;
+            let pct = 0;
+            if (typeof info.progress === "number") {
+              pct = Math.max(0, Math.min(100, info.progress));
+            } else if (info.status === "ready") {
+              pct = 100;
+            }
+            fill.style.width = pct + "%";
+            if (status && info.status) {
+              status.textContent =
+                "Model: " + info.status +
+                (info.file ? " · " + info.file : "");
+            }
+          }
+        });
+
+        used = options;
+        break;
+      } catch (err) {
+        lastError = err;
+        generator = null;
       }
-    });
+    }
+
+    if (!generator || !used) {
+      throw lastError || new Error("No compatible browser backend was available.");
+    }
+
+    localMemeAI.device = used.device;
+    localMemeAI.kind = "transformers";
+    localMemeAI.generator = generator;
     localMemeAI.enabled = true;
     localMemeAI.ready = true;
     localMemeAI.loading = false;
+
     if (fill) fill.style.width = "100%";
-    if (status) status.textContent = "Hugging Face model installed via " + preferredDevice.toUpperCase() + ".";
+    if (status) {
+      status.textContent =
+        "Hugging Face model installed via " +
+        used.device.toUpperCase() + " / " + used.dtype + ".";
+    }
+
     updateLocalAIToggle();
     openLocalAISetup();
-    fetchStandaloneTrendingMemes(8);
+
+    // Web search and model inference stay separate. A model install should
+    // never block the page's live-web startup path.
+    fetchStandaloneTrendingMemes(8).catch(function(){});
   } catch (err) {
     localMemeAI.loading = false;
     localMemeAI.ready = false;
     localMemeAI.generator = null;
     localMemeAI.nativeSession = null;
+    localMemeAI.device = null;
     localMemeAI.kind = null;
     setLocalAIAllowed(false);
-    if (status) status.textContent = "Could not load local AI: " + (err && err.message ? err.message : "unknown error");
+
+    if (status) {
+      status.textContent =
+        "Could not load local AI; keeping deterministic fallback active. " +
+        (err && err.message ? err.message : "unknown error");
+    }
     if (btn) btn.disabled = false;
+    if (fill) fill.style.width = "0%";
     updateLocalAIToggle();
   }
 }
-
 window.enableLocalTrendingAI = enableLocalTrendingAI;
 
 async function localLLMGenerateAchievements(posts, count) {
+  if (localMemeAI.generating) return [];
   if (!localMemeAI.ready || (!localMemeAI.generator && !localMemeAI.nativeSession) || !posts.length) return [];
-  const promptPosts = posts.slice(0, 10).map(function(p, i) {
+
+  localMemeAI.generating = true;
+  const promptPosts = posts.slice(0, 6).map(function(p, i) {
     return (i + 1) + ". " + String(p.title || "").slice(0, 180) + " — " + String(p.text || "").slice(0, 300);
   }).join("\n");
   const prompt = [
@@ -4052,7 +4124,7 @@ async function localLLMGenerateAchievements(posts, count) {
       const out = await localMemeAI.nativeSession.prompt(prompt);
       raw = typeof out === "string" ? out : JSON.stringify(out || "");
     } else {
-      const out = await localMemeAI.generator(prompt, { max_new_tokens: 420, temperature: 0.9, top_p: 0.92, do_sample: true });
+      const out = await localMemeAI.generator(prompt, { max_new_tokens: 220, temperature: 0.85, top_p: 0.9, do_sample: true });
       const text = Array.isArray(out) ? (out[0] && out[0].generated_text) : "";
       raw = typeof text === "string" ? text : (text && text.length ? text[text.length - 1].content : "");
     }
@@ -4063,7 +4135,11 @@ async function localLLMGenerateAchievements(posts, count) {
     return parsed.filter(function(x) { return x && x.title; }).map(function(x) {
       return { title: String(x.title).trim(), description: String(x.description || "Meme energy detected.").trim(), scene: SCENES.includes(x.scene) ? x.scene : "glitch" };
     });
-  } catch (e) { return []; }
+  } catch (e) {
+    return [];
+  } finally {
+    localMemeAI.generating = false;
+  }
 }
 
 
@@ -4095,32 +4171,71 @@ async function fetchSearchText(url, timeoutMs) {
 
 async function fetchSearchGateway(query) {
   const q = encodeURIComponent(String(query || "").trim());
-  const timeout = mobileBrowserNow() ? 8500 : LIVE_SEARCH_TIMEOUT_MS;
-  const ddg = "https://html.duckduckgo.com/html/?q=" + q;
+  const timeout = (typeof mobileBrowserNow === "function" && mobileBrowserNow()) ? 8500 : LIVE_SEARCH_TIMEOUT_MS;
 
-  const routes = [
+  // Route 1: Jina Search — intended as a web-search endpoint and usable from
+  // static frontends. It returns search content in a Markdown/reader format.
+  const jinaSearchUrls = [
     "https://s.jina.ai/" + q,
+    "https://s.jina.ai/?q=" + q
+  ];
+
+  // Route 2: Jina Reader wrapping DuckDuckGo HTML search.
+  const jinaReaderUrls = [
     "https://r.jina.ai/https://html.duckduckgo.com/html/?q=" + q,
-    "https://r.jina.ai/http://html.duckduckgo.com/html/?q=" + q,
-    "https://api.allorigins.win/raw?url=" + encodeURIComponent(ddg),
-    ddg,
+    "https://r.jina.ai/http://html.duckduckgo.com/html/?q=" + q
+  ];
+
+  // Route 3: Public CORS relay wrapping DuckDuckGo HTML search.
+  const target = "https://html.duckduckgo.com/html/?q=" + q;
+  const corsRelays = [
+    "https://api.allorigins.win/raw?url=" + encodeURIComponent(target)
+  ];
+
+  // Route 4/5: direct DDG. These remain useful when DDG happens to expose CORS
+  // to the current browser/network, but they are deliberately last.
+  const directUrls = [
+    target,
     "https://lite.duckduckgo.com/lite/?q=" + q
   ];
 
-  let lastError = null;
-  for (const url of routes) {
+  const routes = []
+    .concat(jinaSearchUrls.map(function(url) {
+      return { url: url, kind: "jina-search" };
+    }))
+    .concat(jinaReaderUrls.map(function(url) {
+      return { url: url, kind: "jina-reader" };
+    }))
+    .concat(corsRelays.map(function(url) {
+      return { url: url, kind: "cors-relay" };
+    }))
+    .concat(directUrls.map(function(url) {
+      return { url: url, kind: "duckduckgo" };
+    }));
+
+  const errors = [];
+
+  for (const route of routes) {
     try {
-      return await fetchSearchText(
-        url,
-        url.indexOf("s.jina.ai") >= 0 ? Math.min(11000, timeout + 2500) : timeout
-      );
+      const body = await fetchTextRoute(route.url, {
+        timeout: route.kind === "jina-search" ? Math.min(11000, timeout + 2500) : timeout,
+        headers: route.kind === "jina-search"
+          ? { "Accept": "text/plain, text/markdown;q=0.9, */*;q=0.8" }
+          : undefined
+      });
+
+      // Keep the response type so the parser can distinguish a search page
+      // from a reader/markdown result payload.
+      return {
+        body: body,
+        kind: route.kind
+      };
     } catch (e) {
-      lastError = e;
+      errors.push(route.kind + ":" + (e && e.name === "AbortError" ? "timeout" : (e && e.message ? e.message : "failed")));
     }
   }
 
-  throw new Error("GitHub live web search unavailable" +
-    (lastError && lastError.message ? ": " + lastError.message : ""));
+  throw new Error("Live search unavailable (" + errors.slice(0, 3).join(", ") + ")");
 }
 
 function cleanSearchText(value) {
@@ -4486,23 +4601,26 @@ setTimeout(async function() {
     updateLocalAICapabilityUI();
   }
   fetchDynamicMemes(DYNAMIC_POOL_TARGET);
-// GitHub Pages: connect to the live web source automatically. This is
-// browser-only and does not require the user to press "Test Online Memes".
-setTimeout(function() {
-  startOnlineWebAutomatically();
-}, 1600);
-
+// GitHub Pages: connect to the live web source automatically.
+// This never downloads the optional Hugging Face model.
 let onlineWebWarmupPromise = null;
+let onlineWebRetryTimer = null;
+
 async function startOnlineWebAutomatically() {
   if (onlineWebWarmupPromise) return onlineWebWarmupPromise;
+
   onlineWebWarmupPromise = (async function() {
     try {
-      const ok = await fetchDynamicMemes(DYNAMIC_POOL_TARGET);
-      if (ok) return true;
-      for (const query of ONLINE_MEME_QUERIES.slice(0, 2)) {
+      // Primary path: the static-hosting-safe dynamic meme collector.
+      if (await fetchDynamicMemes(DYNAMIC_POOL_TARGET)) return true;
+
+      // Secondary path: prove the live web route is reachable even if the
+      // dynamic pool did not receive enough usable results.
+      for (const query of ONLINE_MEME_QUERIES.slice(0, 3)) {
         try {
           const response = await fetchSearchGateway(query);
-          if (parseDuckDuckGoResults(response, query).length) {
+          const parsed = parseDuckDuckGoResults(response, query);
+          if (parsed && parsed.length) {
             state.memeSource = "online";
             updateStatusUI();
             return true;
@@ -4510,23 +4628,57 @@ async function startOnlineWebAutomatically() {
         } catch (e) {}
       }
     } catch (e) {}
+
+    state.memeSource = "offline";
+    updateStatusUI();
     return false;
   })();
-  try { return await onlineWebWarmupPromise; }
-  finally { onlineWebWarmupPromise = null; }
+
+  try {
+    return await onlineWebWarmupPromise;
+  } finally {
+    onlineWebWarmupPromise = null;
+  }
 }
 
+function scheduleOnlineWebRetry(delayMs) {
+  clearTimeout(onlineWebRetryTimer);
+  onlineWebRetryTimer = setTimeout(function() {
+    startOnlineWebAutomatically().then(function(ok) {
+      if (!ok) scheduleOnlineWebRetry(5000);
+    }).catch(function() {
+      scheduleOnlineWebRetry(5000);
+    });
+  }, Math.max(1500, delayMs || 3500));
+}
+
+// Start live web connection shortly after the UI is ready.
+// IMPORTANT: this does not load SmolLM2 automatically.
+setTimeout(function() {
+  startOnlineWebAutomatically().then(function(ok) {
+    if (!ok) scheduleOnlineWebRetry(3500);
+  }).catch(function() {
+    scheduleOnlineWebRetry(3500);
+  });
+}, 1000);
+
 window.addEventListener("online", function() {
-  startOnlineWebAutomatically().catch(function() {});
+  startOnlineWebAutomatically().then(function(ok) {
+    if (!ok) scheduleOnlineWebRetry(2500);
+  }).catch(function() {
+    scheduleOnlineWebRetry(2500);
+  });
 });
 
 document.addEventListener("visibilitychange", function() {
   if (!document.hidden && state.memeSource !== "online") {
-    startOnlineWebAutomatically().catch(function() {});
+    startOnlineWebAutomatically().then(function(ok) {
+      if (!ok) scheduleOnlineWebRetry(3500);
+    }).catch(function() {
+      scheduleOnlineWebRetry(3500);
+    });
   }
 });
-
-}, 1200);
 
 // Some browsers require a user gesture before creating a browser-managed AI session.
 // Retry automatically on the first meaningful interaction if the API is supported.
@@ -4581,8 +4733,8 @@ function rememberWebImage(url) {
 
 // ---- Online image search (Wikipedia API as standalone fallback) ----
 async function fetchOnlineImage(ach) {
-  // Attempt 1: localhost z-ai search-image API (faster, better quality)
-  try {
+  // Attempt 1: local development API. Never probe localhost from GitHub Pages.
+  if (!IS_GITHUB_PAGES) try {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 15000);
     const res = await fetch(API_BASE + "/api/search-image", {
