@@ -1915,6 +1915,32 @@ function loadOverlayImage(url) {
   );
 }
 
+// Clear only the CURRENT achievement's AI/web presentation layers immediately
+// when Generate is pressed. This does not touch archive/history data and does
+// not cancel the existing GitHub/web/AI fetch logic. The procedural SVG/CRT
+// layer becomes the visible fallback during the next generation.
+function clearActiveExternalImagesForGeneration() {
+  aiImageEl = null;
+  onlineImageEl = null;
+  aiImageId = null;
+  onlineImageId = null;
+  loadOverlayImage(null);
+
+  // Remove external images from the current banner thumbnail but keep the
+  // procedural canvas intact until the banner is replaced by the new result.
+  const thumbWrap = document.getElementById('banner-thumb-wrap');
+  if (thumbWrap) {
+    thumbWrap.querySelectorAll('img').forEach(function(img) { img.remove(); });
+  }
+
+  // If the detail modal is open, hide only its AI/Web layers immediately;
+  // keep the procedural SVG tab available.
+  const detailAi = document.getElementById('detail-ai-img');
+  const detailWeb = document.getElementById('detail-web-img');
+  if (detailAi) { detailAi.style.display = 'none'; detailAi.src = ''; }
+  if (detailWeb) { detailWeb.style.display = 'none'; detailWeb.src = ''; }
+}
+
 // AI image (loaded as THREE.Texture when ready)
 let aiImageEl = null, aiImageId = null;
 let onlineImageEl = null, onlineImageId = null;
@@ -4780,6 +4806,13 @@ function loadOnlineImage(ach) {
 
 // Watch current achievement for image updates
 function syncImages() {
+  // During the button press/generation window, never restore the previous
+  // achievement's external AI/Web image. The new achievement will call
+  // syncImages() again after state.current is replaced.
+  if (state.pressing || state.isGenerating) {
+    loadOverlayImage(null);
+    return;
+  }
   const ach = state.current;
   if (!ach) {
     aiImageEl = null; onlineImageEl = null; aiImageId = null; onlineImageId = null;
@@ -4855,6 +4888,11 @@ window.toggleMute = function() {
 
 window.handleGenerate = function() {
   if (state.isGenerating) { state.emptyPresses++; sfx.click(); return; }
+
+  // IMPORTANT: clear the previous AI/Web image at the moment the user presses
+  // Generate, not after the new achievement/SVG has finished loading.
+  clearActiveExternalImagesForGeneration();
+
   sfx.windup();
   sfx.meow(); // cat meows when winding up to press the button
   state.pressing = true;
