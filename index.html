@@ -4065,40 +4065,245 @@ async function localLLMGenerateAchievements(posts, count) {
 }
 
 
-async function fetchSearchGateway(query) {
-  const q = encodeURIComponent(query);
-  const directUrls = [
-    "https://html.duckduckgo.com/html/?q=" + q,
-    "https://lite.duckduckgo.com/lite/?q=" + q
-  ];
-  for (const url of directUrls) {
-    try {
-      const res = await fetch(url, { mode: "cors", headers: { "Accept": "text/html,application/xhtml+xml" } });
-      if (res.ok) return await res.text();
-    } catch (e) {}
-  }
-  try {
-    const proxyUrl = "https://r.jina.ai/http://html.duckduckgo.com/html/?q=" + q;
-    const res = await fetch(proxyUrl, { mode: "cors" });
-    if (res.ok) return await res.text();
-  } catch (e) {}
-  throw new Error("DuckDuckGo search unavailable");
+// ============================================================================
+// GITHUB-PAGES-SAFE LIVE WEB SEARCH
+// DuckDuckGo HTML search is not a reliable browser-CORS API. GitHub Pages is
+// static, so we use several public, HTTPS-only search routes and accept either
+// DuckDuckGo HTML or Markdown/Reader-style responses. Any failed route is
+// skipped automatically; the next route is tried.
+// ============================================================================
+
+const LIVE_SEARCH_TIMEOUT_MS = 12000;
+
+function withTimeoutSignal(timeoutMs) {
+  const controller = new AbortController();
+  const timer = setTimeout(function() { controller.abort(); }, timeoutMs);
+  return { controller: controller, timer: timer };
 }
 
-function parseDuckDuckGoResults(html, sourceQuery) {
-  const doc = new DOMParser().parseFromString(html, "text/html");
-  const nodes = Array.from(doc.querySelectorAll(".result, .result__body, .web-result"));
-  return nodes.map(function(node, index) {
-    const a = node.querySelector(".result__a, a.result__a, h2 a, a");
-    const snippet = node.querySelector(".result__snippet, .snippet, .result__body");
-    if (!a) return null;
-    const title = (a.textContent || "").replace(/\s+/g, " ").trim();
-    const text = (snippet && snippet.textContent || "").replace(/\s+/g, " ").trim();
-    let url = "";
-    try { url = new URL(a.getAttribute("href") || "", location.href).href; } catch (e) {}
-    if (!title || !url || /^javascript:/i.test(url)) return null;
-    return { title: title, text: text || title, score: Math.max(1, 100 - index), source: sourceQuery, url: url };
-  }).filter(Boolean);
+async function fetchTextRoute(url, options) {
+  const opts = options || {};
+  const timed = withTimeoutSignal(opts.timeout || LIVE_SEARCH_TIMEOUT_MS);
+  try {
+    const res = await fetch(url, {
+      method: opts.method || "GET",
+      mode: "cors",
+      cache: "no-store",
+      signal: timed.controller.signal,
+      headers: Object.assign({
+        "Accept": "text/html,application/xhtml+xml,text/plain;q=0.9,*/*;q=0.8"
+      }, opts.headers || {})
+    });
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    const body = await res.text();
+    if (!body || body.trim().length < 40) throw new Error("empty search response");
+    return body;
+  } finally {
+    clearTimeout(timed.timer);
+  }
+}
+
+async function fetchSearchGateway(query) {
+  const q = encodeURIComponent(String(query || "").trim());
+
+  // Route 1: Jina Search — intended as a web-search endpoint and usable from
+  // static frontends. It returns search content in a Markdown/reader format.
+  const jinaSearchUrls = [
+    "https://s.jina.ai/" + q,
+    "https://s.jina.ai/?q=" + q
+  ];
+
+  // Route 2: Jina Reader wrapping DuckDuckGo HTML search.
+  const jinaReaderUrls = [
+    "https://r.jina.ai/https://html.duckduckgo.com/html/?q=" + q,
+    "https://r.jina.ai/http://html.duckduckgo.com/html/?q=" + q
+  ];
+
+  // Route 3: Public CORS relay wrapping DuckDuckGo HTML search.
+  const target = "https://html.duckduckgo.com/html/?q=" + q;
+  const corsRelays = [
+    "https://api.allorigins.win/raw?url=" + encodeURIComponent(target)
+  ];
+
+  // Route 4/5: direct DDG. These remain useful when DDG happens to expose CORS
+  // to the current browser/network, but they are deliberately last.
+  const directUrls = [
+    target,
+    "https://lite.duckduckgo.com/lite/?q=" + q
+  ];
+
+  const routes = []
+    .concat(jinaSearchUrls.map(function(url) {
+      return { url: url, kind: "jina-search" };
+    }))
+    .concat(jinaReaderUrls.map(function(url) {
+      return { url: url, kind: "jina-reader" };
+    }))
+    .concat(corsRelays.map(function(url) {
+      return { url: url, kind: "cors-relay" };
+    }))
+    .concat(directUrls.map(function(url) {
+      return { url: url, kind: "duckduckgo" };
+    }));
+
+  const errors = [];
+
+  for (const route of routes) {
+    try {
+      const body = await fetchTextRoute(route.url, {
+        timeout: route.kind === "jina-search" ? 15000 : LIVE_SEARCH_TIMEOUT_MS,
+        headers: route.kind === "jina-search"
+          ? { "Accept": "text/plain, text/markdown;q=0.9, */*;q=0.8" }
+          : undefined
+      });
+
+      // Keep the response type so the parser can distinguish a search page
+      // from a reader/markdown result payload.
+      return {
+        body: body,
+        kind: route.kind
+      };
+    } catch (e) {
+      errors.push(route.kind + ":" + (e && e.name === "AbortError" ? "timeout" : (e && e.message ? e.message : "failed")));
+    }
+  }
+
+  throw new Error("Live search unavailable (" + errors.slice(0, 3).join(", ") + ")");
+}
+
+function cleanSearchText(value) {
+  return String(value || "")
+    .replace(/!\[([^\]]*)\]\([^)]+\)/g, "$1")
+    .replace(/[*_`~]+/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function addSearchResult(results, seen, title, text, url, sourceQuery, score) {
+  title = cleanSearchText(title);
+  text = cleanSearchText(text);
+  url = String(url || "").trim();
+
+  if (!title || !url || /^javascript:/i.test(url)) return;
+
+  // Ignore navigation/account/internal links returned by reader/relay pages.
+  if (/^(https?:\/\/)?(duckduckgo\.com\/(privacy|settings|about)|javascript:)/i.test(url)) return;
+
+  const key = title.toLowerCase() + "|" + url;
+  if (seen.has(key)) return;
+  seen.add(key);
+
+  results.push({
+    title: title,
+    text: text || title,
+    score: Number.isFinite(score) ? score : Math.max(1, 100 - results.length),
+    source: sourceQuery,
+    url: url
+  });
+}
+
+function parseDuckDuckGoResults(response, sourceQuery) {
+  const payload = response && typeof response === "object" && "body" in response
+    ? response
+    : { body: String(response || ""), kind: "unknown" };
+
+  const raw = String(payload.body || "");
+  const results = [];
+  const seen = new Set();
+
+  // 1) Native/relayed DuckDuckGo HTML.
+  try {
+    const doc = new DOMParser().parseFromString(raw, "text/html");
+    const nodes = Array.from(doc.querySelectorAll(".result, .result__body, .web-result"));
+    nodes.forEach(function(node, index) {
+      const a = node.querySelector(".result__a, a.result__a, h2 a, a[href]");
+      const snippet = node.querySelector(".result__snippet, .snippet, .result__body");
+      if (!a) return;
+
+      const title = a.textContent || "";
+      const text = snippet ? snippet.textContent || "" : title;
+      let url = "";
+      try {
+        url = new URL(a.getAttribute("href") || "", location.href).href;
+      } catch (e) {}
+
+      addSearchResult(
+        results,
+        seen,
+        title,
+        text,
+        url,
+        sourceQuery,
+        Math.max(1, 100 - index)
+      );
+    });
+  } catch (e) {}
+
+  if (results.length >= 3) return results;
+
+  // 2) Markdown / reader-style output. Handles links such as:
+  // [Result title](https://example.com)
+  // and also bare "Title\nhttps://example.com" style payloads.
+  const mdLinkRe = /\[([^\]]{2,240})\]\((https?:\/\/[^)\s]+)\)/g;
+  let match;
+  while ((match = mdLinkRe.exec(raw)) !== null) {
+    const start = Math.max(0, match.index - 260);
+    const end = Math.min(raw.length, match.index + match[0].length + 320);
+    const context = raw.slice(start, end);
+    const contextLines = context
+      .split(/\r?\n/)
+      .map(cleanSearchText)
+      .filter(Boolean);
+
+    let snippet = "";
+    for (const line of contextLines) {
+      if (line === cleanSearchText(match[1])) continue;
+      if (/^https?:\/\//i.test(line)) continue;
+      if (line.length >= 30) {
+        snippet = line;
+        break;
+      }
+    }
+
+    addSearchResult(
+      results,
+      seen,
+      match[1],
+      snippet,
+      match[2],
+      sourceQuery,
+      Math.max(1, 100 - results.length * 3)
+    );
+  }
+
+  // 3) Conservative bare-URL fallback for reader outputs.
+  if (results.length < 3) {
+    const lines = raw.split(/\r?\n/).map(cleanSearchText).filter(Boolean);
+    for (let i = 0; i < lines.length; i++) {
+      if (!/^https?:\/\//i.test(lines[i])) continue;
+
+      let title = "";
+      for (let j = i - 1; j >= Math.max(0, i - 3); j--) {
+        if (lines[j] && !/^https?:\/\//i.test(lines[j]) && lines[j].length >= 5) {
+          title = lines[j];
+          break;
+        }
+      }
+      if (title) {
+        addSearchResult(
+          results,
+          seen,
+          title,
+          title,
+          lines[i],
+          sourceQuery,
+          Math.max(1, 80 - results.length * 4)
+        );
+      }
+    }
+  }
+
+  return results;
 }
 
 async function fetchStandaloneTrendingMemes(requestedCount) {
