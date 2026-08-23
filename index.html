@@ -3722,25 +3722,6 @@ window.addEventListener("orientationchange", function() {
   setTimeout(handleViewportChange, 120);
 }, { passive: true });
 
-
-// Start live web search automatically on both desktop and mobile.
-setTimeout(function() {
-  startOnlineWebAutomatically().catch(function() {});
-}, 180);
-
-// Retry when a mobile browser comes back online or the tab becomes active.
-window.addEventListener("online", function() {
-  onlineWebWarmupPromise = null;
-  startOnlineWebAutomatically().catch(function() {});
-});
-
-document.addEventListener("visibilitychange", function() {
-  if (!document.hidden && state.memeSource !== "online") {
-    onlineWebWarmupPromise = null;
-    startOnlineWebAutomatically().catch(function() {});
-  }
-});
-
 // ============================================================================
 // IMAGE FETCHING — 3-tier system: AI render > online web image > procedural SVG
 // ============================================================================
@@ -4084,41 +4065,116 @@ async function localLLMGenerateAchievements(posts, count) {
 }
 
 
-async function fetchSearchGateway(query) {
-  const q = encodeURIComponent(query);
-  const directUrls = [
-    "https://html.duckduckgo.com/html/?q=" + q,
-    "https://lite.duckduckgo.com/lite/?q=" + q
-  ];
-  for (const url of directUrls) {
-    try {
-      const res = await fetch(url, { mode: "cors", headers: { "Accept": "text/html,application/xhtml+xml" } });
-      if (res.ok) return await res.text();
-    } catch (e) {}
-  }
-  try {
-    const proxyUrl = "https://r.jina.ai/http://html.duckduckgo.com/html/?q=" + q;
-    const res = await fetch(proxyUrl, { mode: "cors" });
-    if (res.ok) return await res.text();
-  } catch (e) {}
-  throw new Error("DuckDuckGo search unavailable");
+const LIVE_SEARCH_TIMEOUT_MS = 12000;
+
+function mobileBrowserNow() {
+  return /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent || "") ||
+         Math.min(window.innerWidth || 9999, window.innerHeight || 9999) < 620;
 }
 
-function parseDuckDuckGoResults(html, sourceQuery) {
-  const doc = new DOMParser().parseFromString(html, "text/html");
-  const nodes = Array.from(doc.querySelectorAll(".result, .result__body, .web-result"));
-  return nodes.map(function(node, index) {
-    const a = node.querySelector(".result__a, a.result__a, h2 a, a");
-    const snippet = node.querySelector(".result__snippet, .snippet, .result__body");
-    if (!a) return null;
-    const title = (a.textContent || "").replace(/\s+/g, " ").trim();
-    const text = (snippet && snippet.textContent || "").replace(/\s+/g, " ").trim();
-    let url = "";
-    try { url = new URL(a.getAttribute("href") || "", location.href).href; } catch (e) {}
-    if (!title || !url || /^javascript:/i.test(url)) return null;
-    return { title: title, text: text || title, score: Math.max(1, 100 - index), source: sourceQuery, url: url };
-  }).filter(Boolean);
+async function fetchSearchText(url, timeoutMs) {
+  const controller = new AbortController();
+  const timer = setTimeout(function() { controller.abort(); }, timeoutMs || LIVE_SEARCH_TIMEOUT_MS);
+  try {
+    const res = await fetch(url, {
+      mode: "cors",
+      cache: "no-store",
+      signal: controller.signal,
+      headers: { "Accept": "text/plain,text/markdown,text/html,application/xhtml+xml,*/*;q=0.8" }
+    });
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    const body = await res.text();
+    if (!body || body.trim().length < 40) throw new Error("empty response");
+    return body;
+  } finally {
+    clearTimeout(timer);
+  }
 }
+
+async function fetchSearchGateway(query) {
+  const q = encodeURIComponent(String(query || "").trim());
+  const timeout = mobileBrowserNow() ? 8500 : LIVE_SEARCH_TIMEOUT_MS;
+  const ddg = "https://html.duckduckgo.com/html/?q=" + q;
+
+  const routes = [
+    "https://s.jina.ai/" + q,
+    "https://r.jina.ai/https://html.duckduckgo.com/html/?q=" + q,
+    "https://r.jina.ai/http://html.duckduckgo.com/html/?q=" + q,
+    "https://api.allorigins.win/raw?url=" + encodeURIComponent(ddg),
+    ddg,
+    "https://lite.duckduckgo.com/lite/?q=" + q
+  ];
+
+  let lastError = null;
+  for (const url of routes) {
+    try {
+      return await fetchSearchText(
+        url,
+        url.indexOf("s.jina.ai") >= 0 ? Math.min(11000, timeout + 2500) : timeout
+      );
+    } catch (e) {
+      lastError = e;
+    }
+  }
+
+  throw new Error("GitHub live web search unavailable" +
+    (lastError && lastError.message ? ": " + lastError.message : ""));
+}
+
+function cleanSearchText(value) {
+  return String(value || "")
+    .replace(/!\[([^\]]*)\]\([^)]+\)/g, "$1")
+    .replace(/[*_`~]+/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function parseDuckDuckGoResults(response, sourceQuery) {
+  const raw = response && typeof response === "object" && "body" in response
+    ? String(response.body || "") : String(response || "");
+  const results = [];
+  const seen = new Set();
+
+  function add(title, snippet, url, score) {
+    title = cleanSearchText(title);
+    snippet = cleanSearchText(snippet);
+    url = String(url || "").trim();
+    if (!title || !/^https?:\/\//i.test(url)) return;
+    const key = title.toLowerCase() + "|" + url;
+    if (seen.has(key)) return;
+    seen.add(key);
+    results.push({
+      title: title,
+      text: snippet || title,
+      score: score || Math.max(1, 100 - results.length),
+      source: sourceQuery,
+      url: url
+    });
+  }
+
+  try {
+    const doc = new DOMParser().parseFromString(raw, "text/html");
+    Array.from(doc.querySelectorAll(".result, .result__body, .web-result")).forEach(function(node, index) {
+      const a = node.querySelector(".result__a, a.result__a, h2 a, a[href]");
+      const snippet = node.querySelector(".result__snippet, .snippet, .result__body");
+      if (!a) return;
+      let url = "";
+      try { url = new URL(a.getAttribute("href") || "", location.href).href; } catch (e) {}
+      add(a.textContent || "", snippet ? snippet.textContent || "" : "", url,
+          Math.max(1, 100 - index));
+    });
+  } catch (e) {}
+
+  // Jina search/reader responses are commonly Markdown links.
+  const md = /\[([^\]]{2,240})\]\((https?:\/\/[^)\s]+)\)/g;
+  let m;
+  while ((m = md.exec(raw)) !== null) {
+    add(m[1], "", m[2], Math.max(1, 90 - results.length * 2));
+  }
+
+  return results;
+}
+
 
 async function fetchStandaloneTrendingMemes(requestedCount) {
   if (!localMemeAI.ready || localMemeFetchInFlight) return false;
@@ -4179,87 +4235,9 @@ async function fetchStandaloneTrendingMemes(requestedCount) {
   }
 }
 
-
-// ============================================================================
-// AUTO-START LIVE WEB CONNECTION
-// The old flow only initialized the live route after "Test Online Memes" was
-// clicked. This warm-up runs automatically on startup and retries after a
-// temporary mobile/desktop network failure.
-// ============================================================================
-let onlineWebWarmupPromise = null;
-
-async function startOnlineWebAutomatically() {
-  if (onlineWebWarmupPromise) return onlineWebWarmupPromise;
-
-  onlineWebWarmupPromise = (async function() {
-    const status = document.getElementById("local-ai-status");
-    try {
-      let liveItems = [];
-      const queries = ONLINE_MEME_QUERIES.slice(0, 3);
-
-      const batches = await Promise.allSettled(
-        queries.map(async function(query) {
-          const response = await fetchSearchGateway(query);
-          return parseDuckDuckGoResults(response, query);
-        })
-      );
-
-      for (const batch of batches) {
-        if (batch.status === "fulfilled" && Array.isArray(batch.value)) {
-          liveItems.push.apply(liveItems, batch.value);
-        }
-      }
-
-      if (!liveItems.length) throw new Error("No live web results returned");
-
-      state.memeSource = "online";
-      updateStatusUI();
-
-      // Warm the normal online pool in the background. Do not block startup.
-      if (!dynamicFetchInFlight && dynamicMemePool.length < DYNAMIC_POOL_TARGET) {
-        Promise.resolve().then(function() {
-          return refreshDynamicMemes(DYNAMIC_POOL_TARGET);
-        }).catch(function() {});
-      }
-
-      if (status) {
-        status.textContent =
-          "ONLINE WEB READY — " + liveItems.length +
-          " live results connected automatically.";
-      }
-      return liveItems.length;
-    } catch (e) {
-      state.memeSource = "offline";
-      updateStatusUI();
-
-      if (status && !localMemeAI.loading) {
-        status.textContent =
-          "ONLINE WEB RETRYING — live search will reconnect automatically.";
-      }
-
-      // Do not permanently cache a failed first attempt.
-      setTimeout(function() {
-        onlineWebWarmupPromise = null;
-        startOnlineWebAutomatically().catch(function() {});
-      }, 3500);
-
-      return 0;
-    }
-  })();
-
-  return onlineWebWarmupPromise;
-}
-
 window.testOnlineMemeSource = async function() {
   const status = document.getElementById("local-ai-status");
   if (status) status.textContent = "Testing live meme search…";
-
-  // Reuse an automatic startup connection when one is already in progress.
-  if (onlineWebWarmupPromise) {
-    const readyCount = await onlineWebWarmupPromise.catch(function() { return 0; });
-    if (readyCount > 0) return readyCount;
-  }
-
   try {
     let liveItems = [];
     for (const query of ONLINE_MEME_QUERIES.slice(0, 3)) {
@@ -4358,6 +4336,48 @@ function isDynamicAchievementSeen(meme) {
 }
 
 async function fetchDynamicMemes(requestedCount) {
+  // GitHub Pages has no /api/fetch-memes backend. Use live browser search
+  // directly before the legacy backend path below.
+  if (!dynamicFetchInFlight) {
+    try {
+      const collected = [];
+      for (const query of ONLINE_MEME_QUERIES.slice(0, 4)) {
+        try {
+          const response = await fetchSearchGateway(query);
+          collected.push.apply(collected, parseDuckDuckGoResults(response, query));
+        } catch (e) {}
+      }
+
+      const unique = new Map();
+      for (const item of collected) {
+        const key = normalizeAchievementText(item.title) + "|" + String(item.url || "");
+        if (key && !unique.has(key)) unique.set(key, item);
+      }
+
+      const ranked = Array.from(unique.values()).slice(0, Math.max(6, requestedCount || DYNAMIC_POOL_TARGET));
+      if (ranked.length) {
+        const queuedKeys = new Set(dynamicMemePool.map(dynamicAchievementKey));
+        for (const item of ranked) {
+          const meme = {
+            title: String(item.title || "Live Web Discovery").trim(),
+            description: String(item.text || item.title || "Live web result.").trim(),
+            scene: SCENES[Math.floor(Math.random() * SCENES.length)]
+          };
+          const key = dynamicAchievementKey(meme);
+          if (!key || queuedKeys.has(key) || isDynamicAchievementSeen(meme)) continue;
+          dynamicMemePool.push(meme);
+          queuedKeys.add(key);
+          if (dynamicMemePool.length >= Math.max(4, requestedCount || DYNAMIC_POOL_TARGET)) break;
+        }
+        if (dynamicMemePool.length) {
+          state.memeSource = "online";
+          updateStatusUI();
+          return true;
+        }
+      }
+    } catch (e) {}
+  }
+
   if (dynamicFetchInFlight) return false;
   dynamicFetchInFlight = true;
   try {
@@ -4414,6 +4434,46 @@ setTimeout(async function() {
     updateLocalAICapabilityUI();
   }
   fetchDynamicMemes(DYNAMIC_POOL_TARGET);
+// GitHub Pages: connect to the live web source automatically. This is
+// browser-only and does not require the user to press "Test Online Memes".
+setTimeout(function() {
+  startOnlineWebAutomatically();
+}, 1600);
+
+let onlineWebWarmupPromise = null;
+async function startOnlineWebAutomatically() {
+  if (onlineWebWarmupPromise) return onlineWebWarmupPromise;
+  onlineWebWarmupPromise = (async function() {
+    try {
+      const ok = await fetchDynamicMemes(DYNAMIC_POOL_TARGET);
+      if (ok) return true;
+      for (const query of ONLINE_MEME_QUERIES.slice(0, 2)) {
+        try {
+          const response = await fetchSearchGateway(query);
+          if (parseDuckDuckGoResults(response, query).length) {
+            state.memeSource = "online";
+            updateStatusUI();
+            return true;
+          }
+        } catch (e) {}
+      }
+    } catch (e) {}
+    return false;
+  })();
+  try { return await onlineWebWarmupPromise; }
+  finally { onlineWebWarmupPromise = null; }
+}
+
+window.addEventListener("online", function() {
+  startOnlineWebAutomatically().catch(function() {});
+});
+
+document.addEventListener("visibilitychange", function() {
+  if (!document.hidden && state.memeSource !== "online") {
+    startOnlineWebAutomatically().catch(function() {});
+  }
+});
+
 }, 1200);
 
 // Some browsers require a user gesture before creating a browser-managed AI session.
