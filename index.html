@@ -4784,6 +4784,15 @@ function loadOnlineImage(ach) {
 
 // Watch current achievement for image updates
 function syncImages() {
+  // Never restore the previous achievement's external image during the
+  // generate wind-up or generation animation. The next achievement will call
+  // syncImages() after state.current is replaced.
+  if (state.pressing || state.isGenerating) {
+    loadOverlayImage(null);
+    aiImageEl = null;
+    onlineImageEl = null;
+    return;
+  }
   const ach = state.current;
   if (!ach) {
     aiImageEl = null; onlineImageEl = null; aiImageId = null; onlineImageId = null;
@@ -4857,8 +4866,49 @@ window.toggleMute = function() {
   }
 };
 
+
+// ============================================================================
+// IMMEDIATE IMAGE CLEAR ON GENERATE
+// Clear the currently displayed AI/Web image at the exact moment Generate is
+// pressed. Do not wait for the new achievement or SVG artwork to finish.
+// This only clears transient display layers; archive/history data is preserved.
+// ============================================================================
+function clearCurrentExternalImageDisplay() {
+  aiImageEl = null;
+  onlineImageEl = null;
+  aiImageId = null;
+  onlineImageId = null;
+  loadOverlayImage(null);
+
+  // Remove any current AI/Web banner thumbnail while the new achievement is
+  // being generated. The SVG/procedural canvas remains available.
+  const bannerThumbWrap = document.getElementById("banner-thumb-wrap");
+  if (bannerThumbWrap) {
+    bannerThumbWrap.querySelectorAll("img").forEach(function(img) {
+      img.remove();
+    });
+  }
+
+  // Hide any AI/Web image that may currently be visible in the detail modal.
+  const detailAi = document.getElementById("detail-ai-img");
+  const detailWeb = document.getElementById("detail-web-img");
+  if (detailAi) {
+    detailAi.style.display = "none";
+    detailAi.removeAttribute("src");
+  }
+  if (detailWeb) {
+    detailWeb.style.display = "none";
+    detailWeb.removeAttribute("src");
+  }
+}
+
 window.handleGenerate = function() {
   if (state.isGenerating) { state.emptyPresses++; sfx.click(); return; }
+
+  // Clear AI/Web imagery immediately on the click/touch event, before the
+  // wind-up animation, SVG rendering, or network/image generation begins.
+  clearCurrentExternalImageDisplay();
+
   sfx.windup();
   sfx.meow(); // cat meows when winding up to press the button
   state.pressing = true;
