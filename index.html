@@ -704,6 +704,8 @@
           <button id="btn-enable-local-ai" onclick="enableLocalTrendingAI()">Install Hugging Face Model</button>
           <button id="btn-use-native-ai" onclick="enableBrowserBuiltInAI()" style="display:none">Use Built-in AI</button>
           <button id="btn-uninstall-local-ai" onclick="uninstallLocalTrendingAI()" style="border-color:#dc2626;color:#fca5a5;background:rgba(127,29,29,.18);display:inline-flex;font-weight:700">Uninstall Hugging Face Model</button>
+          <button id="btn-online-ai" onclick="configureOnlineAI()">Use Online AI</button>
+          <button id="btn-clear-online-ai" onclick="clearOnlineAI()" style="border-color:#60a5fa;color:#93c5fd;background:rgba(30,64,175,.16)">Clear Online AI</button>
           <button id="btn-test-online-memes" onclick="testOnlineMemeSource()">Test Online Memes</button>
         </div>
       </div>
@@ -3771,6 +3773,8 @@ const API_BASE = "http://localhost:3000";
 // ---- Standalone local meme AI ----
 const LOCAL_AI_STORAGE_KEY = "crt-cat-local-meme-ai-v1";
 const NATIVE_AI_DISABLED_STORAGE_KEY = "crt-cat-native-ai-disabled-v1";
+const ONLINE_AI_TOKEN_STORAGE_KEY = "crt-cat-online-ai-hf-token-v1";
+const ONLINE_AI_MODEL = "openai/gpt-oss-20b";
 const LOCAL_AI_MODEL = "HuggingFaceTB/SmolLM2-135M-Instruct";
 const LOCAL_MEME_SUBREDDITS = ["memes", "dankmemes", "me_irl"];
 let localMemeAI = { enabled: false, ready: false, loading: false, generator: null, nativeSession: null, device: null, kind: null };
@@ -3779,6 +3783,52 @@ const ONLINE_MEME_QUERIES = [
   "reddit memes", "funny internet memes", "dank memes", "popular meme posts"
 ];
 let localMemeFetchInFlight = false;
+
+function getOnlineAIToken() {
+  try {
+    const token = localStorage.getItem(ONLINE_AI_TOKEN_STORAGE_KEY) || "";
+    return token.trim();
+  } catch (e) { return ""; }
+}
+function setOnlineAIToken(token) {
+  try {
+    const clean = String(token || "").trim();
+    if (clean) localStorage.setItem(ONLINE_AI_TOKEN_STORAGE_KEY, clean);
+    else localStorage.removeItem(ONLINE_AI_TOKEN_STORAGE_KEY);
+    return true;
+  } catch (e) { return false; }
+}
+function hasOnlineAI() { return !!getOnlineAIToken(); }
+function updateOnlineAIStatus(status) {
+  if (status) status.textContent = hasOnlineAI()
+    ? "Online AI configured: Hugging Face Inference Providers."
+    : "Online AI not configured. Live web search still works without it.";
+}
+window.configureOnlineAI = function() {
+  const current = getOnlineAIToken();
+  const entered = window.prompt(
+    "Paste your Hugging Face access token (hf_...). It is stored only in this browser's localStorage and is never written into the GitHub file.\n\nCreate one at: https://huggingface.co/settings/tokens",
+    current ? "" : ""
+  );
+  if (entered === null) return false;
+  const token = String(entered).trim();
+  if (!/^hf_[A-Za-z0-9_-]{20,}$/.test(token)) {
+    const status = document.getElementById("local-ai-status");
+    if (status) status.textContent = "Invalid Hugging Face token. Expected a token starting with hf_.";
+    return false;
+  }
+  setOnlineAIToken(token);
+  const status = document.getElementById("local-ai-status");
+  if (status) status.textContent = "ONLINE AI READY — live web results can now be converted into achievements.";
+  updateLocalAIToggle();
+  return true;
+};
+window.clearOnlineAI = function() {
+  setOnlineAIToken("");
+  const status = document.getElementById("local-ai-status");
+  if (status) status.textContent = "Online AI token removed from this browser.";
+  updateLocalAIToggle();
+};
 
 function localAIIsAllowed() {
   try { return localStorage.getItem(LOCAL_AI_STORAGE_KEY) === "enabled"; } catch (e) { return false; }
@@ -3797,6 +3847,7 @@ function updateLocalAIToggle() {
   if (!b) return;
   b.classList.add("show");
   if (localMemeAI.kind === "native" && localMemeAI.ready) b.textContent = "Built-in AI: ON";
+  else if (hasOnlineAI()) b.textContent = "Online AI: ON";
   else if (localMemeAI.loading) b.textContent = "AI: LOADING";
   else if (nativeAISupported() && nativeAIAutoDisabled()) b.textContent = "Built-in AI: OFF";
   else if (!nativeAISupported()) b.textContent = "Built-in AI: UNSUPPORTED";
@@ -3810,8 +3861,9 @@ function openLocalAISetup() {
   const status = document.getElementById("local-ai-status");
   if (status) {
     if (localMemeAI.ready) status.textContent = "Ready: " + (localMemeAI.kind === "native" ? "browser built-in AI" : localMemeAI.device.toUpperCase());
+    else if (hasOnlineAI()) status.textContent = "Online AI is configured. Live web results can be converted without downloading SmolLM2.";
     else if (nativeAIAvailable()) status.textContent = "Built-in browser AI is available. No model download is needed.";
-    else status.textContent = "Permission is required before a local fallback model can be downloaded.";
+    else status.textContent = "Live web search works without a model; configure Online AI or use the desktop local model.";
   }
   const b = document.getElementById("btn-enable-local-ai");
   if (b) {
@@ -3825,6 +3877,10 @@ function openLocalAISetup() {
     nativeBtn.textContent = (localMemeAI.kind === "native" && localMemeAI.ready) ? "Deactivate Built-in AI" : "Activate Built-in AI";
     nativeBtn.onclick = (localMemeAI.kind === "native" && localMemeAI.ready) ? disableBrowserBuiltInAI : enableBrowserBuiltInAI;
   }
+  const onlineBtn = document.getElementById("btn-online-ai");
+  if (onlineBtn) onlineBtn.textContent = hasOnlineAI() ? "Online AI: ON" : "Use Online AI";
+  const clearOnlineBtn = document.getElementById("btn-clear-online-ai");
+  if (clearOnlineBtn) clearOnlineBtn.disabled = !hasOnlineAI();
   const uninstallBtn = document.getElementById("btn-uninstall-local-ai");
   if (uninstallBtn) {
     // Always show this control: it specifically removes the Hugging Face
@@ -3863,8 +3919,10 @@ async function getNativeAIAvailability() {
 function updateLocalAICapabilityUI() {
   const el = document.getElementById("local-ai-capability");
   if (!el) return;
-  if (!nativeAISupported()) {
-    el.textContent = "Built-in AI unavailable — this browser does not support the LanguageModel API.";
+  if (hasOnlineAI()) {
+    el.textContent = "ONLINE AI ACTIVE — live web search + Hugging Face Inference Providers.";
+  } else if (!nativeAISupported()) {
+    el.textContent = "Built-in AI unavailable — this browser does not support the LanguageModel API. Online AI can be used instead.";
   } else if (nativeAIAutoDisabled()) {
     el.textContent = "Built-in browser AI is supported but manually deactivated.";
   } else if (localMemeAI.kind === "native" && localMemeAI.ready) {
@@ -4005,14 +4063,34 @@ async function uninstallLocalTrendingAI() {
 }
 window.uninstallLocalTrendingAI = uninstallLocalTrendingAI;
 
+function isConstrainedLocalAIEnvironment() {
+  const ua = navigator.userAgent || "";
+  const mobile = /Android|iPhone|iPad|iPod|Mobile/i.test(ua) || Math.min(window.innerWidth, window.innerHeight) < 620;
+  const mem = Number(navigator.deviceMemory || 0);
+  return mobile || (mem > 0 && mem < 4);
+}
+
 async function enableLocalTrendingAI() {
   if (localMemeAI.loading || localMemeAI.ready) { closeLocalAISetup(); return; }
+  const status = document.getElementById("local-ai-status");
+  const btn = document.getElementById("btn-enable-local-ai");
+
+  // SmolLM2 can exhaust mobile browser memory during model initialization even
+  // after the download succeeds. Do not instantiate it in constrained browsers.
+  // Live web search remains available, and built-in browser AI is still preferred.
+  if (isConstrainedLocalAIEnvironment()) {
+    setLocalAIAllowed(false);
+    localMemeAI.loading = false;
+    if (status) status.textContent = "Hugging Face model is disabled on this mobile/low-memory browser to prevent crashes. Live web search still works; use Built-in AI when supported or open on desktop for the optional model.";
+    if (btn) btn.disabled = false;
+    updateLocalAIToggle();
+    return false;
+  }
+
   setLocalAIAllowed(true);
   localMemeAI.loading = true;
-  const btn = document.getElementById("btn-enable-local-ai");
   const bar = document.getElementById("local-ai-progress");
   const fill = bar && bar.firstElementChild;
-  const status = document.getElementById("local-ai-status");
   if (btn) btn.disabled = true;
   if (bar) bar.style.display = "block";
   try {
@@ -4058,8 +4136,77 @@ async function enableLocalTrendingAI() {
 
 window.enableLocalTrendingAI = enableLocalTrendingAI;
 
+async function onlineLLMGenerateAchievements(posts, count) {
+  const token = getOnlineAIToken();
+  if (!token || !posts || !posts.length) return [];
+  const promptPosts = posts.slice(0, 10).map(function(p, i) {
+    return (i + 1) + ". " + String(p.title || "").slice(0, 180) + " — " + String(p.text || "").slice(0, 300);
+  }).join("\n");
+  const prompt = [
+    "Create exactly " + Math.max(1, Math.min(count || 6, 8)) + " unique video-game style achievements inspired by these LIVE web search results.",
+    "Use the web snippets as current inspiration, but do not claim facts that are not in the snippets. Do not copy exact titles, captions, or sentences.",
+    "Return ONLY valid JSON: an array of objects with keys title, description, scene. No markdown fences.",
+    "Allowed scene values: " + SCENES.join(", ") + ".",
+    "LIVE WEB RESULTS:\n" + promptPosts
+  ].join("\n");
+  const controller = new AbortController();
+  const timer = setTimeout(function() { controller.abort(); }, isMobileBrowser() ? 22000 : 30000);
+  try {
+    const res = await fetch("https://router.huggingface.co/v1/chat/completions", {
+      method: "POST",
+      mode: "cors",
+      headers: {
+        "Authorization": "Bearer " + token,
+        "Content-Type": "application/json",
+        "Accept": "application/json"
+      },
+      body: JSON.stringify({
+        model: ONLINE_AI_MODEL,
+        messages: [
+          { role: "system", content: "You create concise, original game achievements. Return only a JSON array." },
+          { role: "user", content: prompt }
+        ],
+        temperature: 0.85,
+        max_tokens: 700
+      }),
+      signal: controller.signal
+    });
+    if (!res.ok) {
+      const msg = await res.text().catch(function() { return ""; });
+      throw new Error("HF online AI HTTP " + res.status + (msg ? ": " + msg.slice(0, 160) : ""));
+    }
+    const data = await res.json();
+    const raw = data && data.choices && data.choices[0] && data.choices[0].message
+      ? data.choices[0].message.content
+      : "";
+    const match = String(raw || "").match(/\[[\s\S]*\]/);
+    if (!match) return [];
+    const parsed = JSON.parse(match[0]);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter(function(x) { return x && x.title; }).map(function(x) {
+      return {
+        title: String(x.title).trim(),
+        description: String(x.description || "Live web energy detected.").trim(),
+        scene: SCENES.includes(x.scene) ? x.scene : "glitch"
+      };
+    });
+  } catch (e) {
+    const status = document.getElementById("local-ai-status");
+    if (status) status.textContent = e && e.name === "AbortError"
+      ? "Online AI timed out; using the procedural fallback."
+      : "Online AI unavailable; using the procedural fallback.";
+    return [];
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function localLLMGenerateAchievements(posts, count) {
-  if (!localMemeAI.ready || (!localMemeAI.generator && !localMemeAI.nativeSession) || !posts.length) return [];
+  if (!posts || !posts.length) return [];
+  if ((!localMemeAI.ready || (!localMemeAI.generator && !localMemeAI.nativeSession)) && hasOnlineAI()) {
+    return await onlineLLMGenerateAchievements(posts, count);
+  }
+  if (!localMemeAI.ready || (!localMemeAI.generator && !localMemeAI.nativeSession)) return [];
   const promptPosts = posts.slice(0, 10).map(function(p, i) {
     return (i + 1) + ". " + String(p.title || "").slice(0, 180) + " — " + String(p.text || "").slice(0, 300);
   }).join("\n");
@@ -4099,11 +4246,9 @@ async function localLLMGenerateAchievements(posts, count) {
 // skipped automatically; the next route is tried.
 // ============================================================================
 
-const LIVE_SEARCH_TIMEOUT_MS = 9000;
-const LIVE_SEARCH_MOBILE_TIMEOUT_MS = 7000;
-let liveSearchInFlight = null;
-const liveSearchCache = new Map();
-const LIVE_SEARCH_CACHE_TTL = 120000;
+const LIVE_SEARCH_TIMEOUT_MS = 12000;
+const MOBILE_LIVE_SEARCH_TIMEOUT_MS = 8500;
+function isMobileBrowser() { return /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent || "") || Math.min(window.innerWidth, window.innerHeight) < 620; }
 
 function withTimeoutSignal(timeoutMs) {
   const controller = new AbortController();
@@ -4134,24 +4279,15 @@ async function fetchTextRoute(url, options) {
 }
 
 async function fetchSearchGateway(query) {
-  const cleanQuery = String(query || "").trim();
-  if (!cleanQuery) throw new Error("empty search query");
+  const q = encodeURIComponent(String(query || "").trim());
+  const mobile = isMobileBrowser();
 
-  const cacheKey = cleanQuery.toLowerCase();
-  const cached = liveSearchCache.get(cacheKey);
-  if (cached && (Date.now() - cached.time) < LIVE_SEARCH_CACHE_TTL) return cached.value;
-  if (liveSearchInFlight && liveSearchInFlight.has(cacheKey)) return liveSearchInFlight.get(cacheKey);
-
-  const promise = (async function() {
-    const q = encodeURIComponent(cleanQuery);
-    const mobile = window.innerWidth < 768 || window.matchMedia?.('(pointer: coarse)').matches;
-
-    // IMPORTANT: Jina Search's documented browser form is ?q=. The old
-    // /<query> form could waste the whole timeout on mobile before reaching
-    // the working endpoint. Keep the valid route first on every device.
-    const jinaSearchUrls = [
-      "https://s.jina.ai/?q=" + q
-    ];
+  // Route 1: Jina Search — intended as a web-search endpoint and usable from
+  // static frontends. It returns search content in a Markdown/reader format.
+  const jinaSearchUrls = [
+    "https://s.jina.ai/" + q,
+    "https://s.jina.ai/?q=" + q
+  ];
 
   // Route 2: Jina Reader wrapping DuckDuckGo HTML search.
   const jinaReaderUrls = [
@@ -4191,9 +4327,7 @@ async function fetchSearchGateway(query) {
   for (const route of routes) {
     try {
       const body = await fetchTextRoute(route.url, {
-        timeout: mobile
-          ? LIVE_SEARCH_MOBILE_TIMEOUT_MS
-          : (route.kind === "jina-search" ? 10000 : LIVE_SEARCH_TIMEOUT_MS),
+        timeout: route.kind === "jina-search" ? (mobile ? 11000 : 15000) : (mobile ? MOBILE_LIVE_SEARCH_TIMEOUT_MS : LIVE_SEARCH_TIMEOUT_MS),
         headers: route.kind === "jina-search"
           ? { "Accept": "text/plain, text/markdown;q=0.9, */*;q=0.8" }
           : undefined
@@ -4201,24 +4335,16 @@ async function fetchSearchGateway(query) {
 
       // Keep the response type so the parser can distinguish a search page
       // from a reader/markdown result payload.
-      const value = { body: body, kind: route.kind };
-      liveSearchCache.set(cacheKey, { time: Date.now(), value: value });
-      return value;
+      return {
+        body: body,
+        kind: route.kind
+      };
     } catch (e) {
       errors.push(route.kind + ":" + (e && e.name === "AbortError" ? "timeout" : (e && e.message ? e.message : "failed")));
     }
   }
 
-    throw new Error("Live search unavailable (" + errors.slice(0, 3).join(", ") + ")");
-  })();
-
-  if (!liveSearchInFlight) liveSearchInFlight = new Map();
-  liveSearchInFlight.set(cacheKey, promise);
-  try {
-    return await promise;
-  } finally {
-    liveSearchInFlight.delete(cacheKey);
-  }
+  throw new Error("Live search unavailable (" + errors.slice(0, 3).join(", ") + ")");
 }
 
 function cleanSearchText(value) {
@@ -4256,8 +4382,6 @@ function parseDuckDuckGoResults(response, sourceQuery) {
   const payload = response && typeof response === "object" && "body" in response
     ? response
     : { body: String(response || ""), kind: "unknown" };
-  // Jina search can return Markdown without DDG's .result classes. Do not
-  // reject those responses just because the native HTML selector is empty.
 
   const raw = String(payload.body || "");
   const results = [];
@@ -4359,7 +4483,7 @@ function parseDuckDuckGoResults(response, sourceQuery) {
 }
 
 async function fetchStandaloneTrendingMemes(requestedCount) {
-  if (!localMemeAI.ready || localMemeFetchInFlight) return false;
+  if ((!localMemeAI.ready && !hasOnlineAI()) || localMemeFetchInFlight) return false;
   localMemeFetchInFlight = true;
   try {
     const collected = [];
@@ -4419,27 +4543,24 @@ async function fetchStandaloneTrendingMemes(requestedCount) {
 
 window.testOnlineMemeSource = async function() {
   const status = document.getElementById("local-ai-status");
-  if (status) status.textContent = "Testing live web search…";
+  if (status) status.textContent = "Testing live meme search…";
   try {
-    if (navigator.onLine === false) throw new Error("device is offline");
     let liveItems = [];
-    let lastError = null;
     for (const query of ONLINE_MEME_QUERIES.slice(0, 3)) {
       try {
-        const response = await fetchSearchGateway(query);
-        liveItems.push.apply(liveItems, parseDuckDuckGoResults(response, query));
-        if (liveItems.length >= 8) break;
-      } catch (e) { lastError = e; }
+        const html = await fetchSearchGateway(query);
+        liveItems.push.apply(liveItems, parseDuckDuckGoResults(html, query));
+      } catch (e) {}
     }
-    if (!liveItems.length) throw (lastError || new Error("Search returned no parseable results"));
+    if (!liveItems.length) throw new Error("No live DuckDuckGo results returned");
     state.memeSource = "online";
     updateStatusUI();
-    if (status) status.textContent = "ONLINE WEB WORKING — " + liveItems.length + " live web results found. " + (localMemeAI.ready ? "Local AI can convert them into achievements." : "Enable Local AI to convert them into achievements standalone.");
+    if (status) status.textContent = "ONLINE WEB WORKING — " + liveItems.length + " live results found. " + (localMemeAI.ready ? "Local AI can convert them into achievements." : (hasOnlineAI() ? "Online AI can convert them into achievements." : "Configure Online AI or use Built-in AI to convert them into achievements."));
     return liveItems.length;
   } catch (e) {
     state.memeSource = "offline";
     updateStatusUI();
-    if (status) status.textContent = "ONLINE WEB TEST FAILED — " + (e && e.message ? e.message : "network/CORS blocked") + ". Tap again to retry.";
+    if (status) status.textContent = "ONLINE WEB TEST FAILED — " + (e && e.message ? e.message : "network/CORS blocked");
     return 0;
   }
 };
@@ -4553,7 +4674,7 @@ async function fetchDynamicMemes(requestedCount) {
     return incoming.length > 0;
   } catch (e) {
     dynamicFetchFailures++;
-    if (localMemeAI.ready) return await fetchStandaloneTrendingMemes(requestedCount || DYNAMIC_POOL_TARGET);
+    if (localMemeAI.ready || hasOnlineAI()) return await fetchStandaloneTrendingMemes(requestedCount || DYNAMIC_POOL_TARGET);
     return false;
   } finally {
     dynamicFetchInFlight = false;
@@ -4577,6 +4698,7 @@ setTimeout(async function() {
     updateLocalAICapabilityUI();
   }
   fetchDynamicMemes(DYNAMIC_POOL_TARGET);
+  if (hasOnlineAI()) setTimeout(function() { fetchStandaloneTrendingMemes(DYNAMIC_POOL_TARGET); }, 500);
 }, 1200);
 
 // Some browsers require a user gesture before creating a browser-managed AI session.
@@ -4961,7 +5083,7 @@ window.handleGenerate = function() {
       if (dynamicMemePool.length < DYNAMIC_POOL_LOW_WATER) {
         fetchDynamicMemes(DYNAMIC_POOL_TARGET - dynamicMemePool.length);
       }
-      if (dynamicMemePool.length === 0 && localMemeAI.ready) {
+      if (dynamicMemePool.length === 0 && (localMemeAI.ready || hasOnlineAI())) {
         await fetchStandaloneTrendingMemes(DYNAMIC_POOL_TARGET);
       }
       if (dynamicMemePool.length > 0) {
@@ -5162,6 +5284,7 @@ function updateStatusUI() {
     let engine = "LOCAL";
     if (nativeAISupported() && nativeAIAutoDisabled() && !(localMemeAI && localMemeAI.ready)) engine = "OFF • BUILT-IN AI";
     else if (!nativeAISupported() && !(localMemeAI && localMemeAI.ready)) engine = "UNSUPPORTED • BUILT-IN AI";
+    if (hasOnlineAI() && (!localMemeAI || !localMemeAI.ready)) engine = "ONLINE • HF AI";
     if (localMemeAI && localMemeAI.ready) {
       // Browser-managed built-in AI should be labeled ONLINE whenever active,
       // matching the requested UI semantics even when the model itself is
