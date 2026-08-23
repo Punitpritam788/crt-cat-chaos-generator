@@ -1,4 +1,4 @@
-# CRT Cat Chaos Achievement Generator 🐱💻
+# CRT CAT Chaos Achievement Generator 🐱💻
 
 ## #️⃣-tags #🎮-gameplay #🤖-ai-generated #✨-retro-aesthetic #🎨-procedural-art
 
