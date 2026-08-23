@@ -4005,8 +4005,30 @@ async function uninstallLocalTrendingAI() {
 }
 window.uninstallLocalTrendingAI = uninstallLocalTrendingAI;
 
+function isConstrainedLocalAIEnvironment() {
+  const ua = navigator.userAgent || "";
+  const mobile = /Android|iPhone|iPad|iPod|Mobile/i.test(ua) || Math.min(window.innerWidth, window.innerHeight) < 620;
+  const mem = Number(navigator.deviceMemory || 0);
+  return mobile || (mem > 0 && mem < 4);
+}
+
 async function enableLocalTrendingAI() {
   if (localMemeAI.loading || localMemeAI.ready) { closeLocalAISetup(); return; }
+  const status = document.getElementById("local-ai-status");
+  const btn = document.getElementById("btn-enable-local-ai");
+
+  // SmolLM2 can exhaust mobile browser memory during model initialization even
+  // after the download succeeds. Do not instantiate it in constrained browsers.
+  // Live web search remains available, and built-in browser AI is still preferred.
+  if (isConstrainedLocalAIEnvironment()) {
+    setLocalAIAllowed(false);
+    localMemeAI.loading = false;
+    if (status) status.textContent = "Hugging Face model is disabled on this mobile/low-memory browser to prevent crashes. Live web search still works; use Built-in AI when supported or open on desktop for the optional model.";
+    if (btn) btn.disabled = false;
+    updateLocalAIToggle();
+    return false;
+  }
+
   setLocalAIAllowed(true);
   localMemeAI.loading = true;
   const btn = document.getElementById("btn-enable-local-ai");
@@ -4100,6 +4122,8 @@ async function localLLMGenerateAchievements(posts, count) {
 // ============================================================================
 
 const LIVE_SEARCH_TIMEOUT_MS = 12000;
+const MOBILE_LIVE_SEARCH_TIMEOUT_MS = 8500;
+function isMobileBrowser() { return /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent || "") || Math.min(window.innerWidth, window.innerHeight) < 620; }
 
 function withTimeoutSignal(timeoutMs) {
   const controller = new AbortController();
@@ -4131,6 +4155,7 @@ async function fetchTextRoute(url, options) {
 
 async function fetchSearchGateway(query) {
   const q = encodeURIComponent(String(query || "").trim());
+  const mobile = isMobileBrowser();
 
   // Route 1: Jina Search — intended as a web-search endpoint and usable from
   // static frontends. It returns search content in a Markdown/reader format.
@@ -4177,7 +4202,7 @@ async function fetchSearchGateway(query) {
   for (const route of routes) {
     try {
       const body = await fetchTextRoute(route.url, {
-        timeout: route.kind === "jina-search" ? 15000 : LIVE_SEARCH_TIMEOUT_MS,
+        timeout: route.kind === "jina-search" ? (mobile ? 11000 : 15000) : (mobile ? MOBILE_LIVE_SEARCH_TIMEOUT_MS : LIVE_SEARCH_TIMEOUT_MS),
         headers: route.kind === "jina-search"
           ? { "Accept": "text/plain, text/markdown;q=0.9, */*;q=0.8" }
           : undefined
